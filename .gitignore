@@ -1,0 +1,26 @@
+# ---- Secrets (NEVER commit) ----
+.env
+.env.*
+!.env.example
+
+# ---- Dependencies ----
+node_modules/
+
+# ---- Runtime state & generated output ----
+state.json
+backtest_results.png
+
+# ---- Trade logs (per-environment runtime data) ----
+trades.csv
+daily_pnl.csv
+
+# ---- Logs ----
+*.log
+npm-debug.log*
+logs/
+
+# ---- OS / editor cruft ----
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
