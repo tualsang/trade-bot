@@ -15,10 +15,6 @@
     "dotenv": "^16.4.5",
     "node-schedule": "^2.1.1"
   },
-  "optionalDependencies": {
-    "chart.js": "^4.4.3",
-    "chartjs-node-canvas": "^4.1.6"
-  },
   "engines": {
     "node": ">=16.9"
   }
