@@ -46,8 +46,8 @@ module.exports = {
     'MU', 'SNDK', 'SOXL', 'INTC', 'MRVL',
   ],
 
-  // 50% of total account equity is deployed; the remaining 50% stays in cash.
-  DEPLOY_FRACTION: 0.5,
+  // 75% of total account equity is deployed; the remaining 50% stays in cash.
+  DEPLOY_FRACTION: 0.75,
 
   // Buy this many minutes before the official close.
   MINUTES_BEFORE_CLOSE: 15,
