@@ -17,6 +17,7 @@ const { withRetry } = require('./utils/alpaca');
 const { notify } = require('./utils/notifier');
 const { runBuy, runSell, reconcileFromAlpaca } = require('./strategies/close_open_strat');
 const risk = require('./strategies/risk');
+const commander = require('./utils/commander');
 
 let buyJob = null;
 let sellJob = null;
@@ -114,6 +115,9 @@ async function main() {
 
   // Plan immediately on launch.
   await plan();
+
+  // Start the Telegram command listener (owner-only; no-op if not configured).
+  commander.startPolling();
 
   await notify('🤖 Trading bot started.');
 
