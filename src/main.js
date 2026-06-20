@@ -3,32 +3,28 @@
 /**
  * Entry point + scheduler.
  *
- * A daily "planner" runs at 08:00 ET (and once on startup). Each run queries
- * Alpaca's clock endpoint and, for trading days, schedules:
- *   - SELL at today's open  (closes positions held overnight)
- *   - BUY  at today's close minus MINUTES_BEFORE_CLOSE
- *
- * Anchoring on the clock's next_open / next_close ISO timestamps means DST
- * shifts and early-close holidays are handled automatically — no hard-coded
- * 3:45 PM offset that would silently break in summer or on half-days.
+ * On startup: reconcile local state against live Alpaca positions, then plan.
+ * Daily planner (08:00 ET + on launch): for trading days, capture the day's
+ * equity baseline and schedule SELL at the open and BUY 15 min before close.
+ * If the kill switch is enabled, an intraday monitor checks the daily-loss limit
+ * every 10 minutes during the session.
  */
 
 const schedule = require('node-schedule');
 const { alpaca, TIMEZONE, MINUTES_BEFORE_CLOSE } = require('./config');
 const log = require('./utils/logger');
 const { withRetry } = require('./utils/alpaca');
-const { runBuy, runSell } = require('./strategies/close_open_strat');
+const { notify } = require('./utils/notifier');
+const { runBuy, runSell, reconcileFromAlpaca } = require('./strategies/close_open_strat');
+const risk = require('./strategies/risk');
 
 let buyJob = null;
 let sellJob = null;
 
-// The date portion of an Alpaca ISO timestamp is already in ET (it carries the
-// -04:00 / -05:00 offset), so slicing gives the ET calendar date directly.
 function etDate(iso) {
   return String(iso).slice(0, 10);
 }
 
-// Wrap a routine so a thrown error can never kill the scheduler process.
 function safe(fn, label) {
   return async () => {
     try {
@@ -48,41 +44,38 @@ async function plan() {
     const closeIsToday = etDate(clock.next_close) === today;
     const openIsToday = etDate(clock.next_open) === today;
 
-    // Weekend / holiday: clock points to a future session and we're not open.
     if (!clock.is_open && !openIsToday && !closeIsToday) {
       log.info('Non-trading day (weekend/holiday). Nothing scheduled today.');
       return;
     }
 
-    // --- SELL at today's open (positions held overnight). ---
-    if (sellJob) {
-      sellJob.cancel();
-      sellJob = null;
+    // Capture the day's equity baseline for the kill switch.
+    if (risk.isEnabled()) {
+      try {
+        await risk.captureDayStart(today);
+      } catch (err) {
+        log.error('Could not capture day-start equity:', err?.message || err);
+      }
     }
+
+    // SELL at today's open (positions held overnight).
+    if (sellJob) { sellJob.cancel(); sellJob = null; }
     const openTime = new Date(clock.next_open);
     if (openIsToday && openTime.getTime() > Date.now()) {
       sellJob = schedule.scheduleJob(openTime, safe(() => runSell(), 'sell'));
       log.info(`Scheduled SELL at open: ${openTime.toISOString()}`);
     } else if (clock.is_open) {
-      // Restarted mid-session: close only positions opened on a prior day.
       log.info('Market already open — running catch-up sell for overnight positions.');
       await safe(() => runSell({ onlyOvernight: true }), 'sell')();
     }
 
-    // --- BUY at (today's close - MINUTES_BEFORE_CLOSE). ---
-    if (buyJob) {
-      buyJob.cancel();
-      buyJob = null;
-    }
+    // BUY at (today's close - MINUTES_BEFORE_CLOSE).
+    if (buyJob) { buyJob.cancel(); buyJob = null; }
     if (closeIsToday) {
-      const buyTime = new Date(
-        new Date(clock.next_close).getTime() - MINUTES_BEFORE_CLOSE * 60_000
-      );
+      const buyTime = new Date(new Date(clock.next_close).getTime() - MINUTES_BEFORE_CLOSE * 60_000);
       if (buyTime.getTime() > Date.now()) {
         buyJob = schedule.scheduleJob(buyTime, safe(() => runBuy(), 'buy'));
-        log.info(
-          `Scheduled BUY ${MINUTES_BEFORE_CLOSE} min before close: ${buyTime.toISOString()}`
-        );
+        log.info(`Scheduled BUY ${MINUTES_BEFORE_CLOSE} min before close: ${buyTime.toISOString()}`);
       } else {
         log.warn(`Buy window (${buyTime.toISOString()}) already passed today.`);
       }
@@ -92,10 +85,13 @@ async function plan() {
   }
 }
 
-function main() {
+async function main() {
   log.info('Close/Open Arbitrage bot starting (paper trading).');
 
-  // Daily planner at 08:00 America/New_York.
+  // Reconcile against live positions before doing anything else.
+  await safe(() => reconcileFromAlpaca(), 'reconcile')();
+
+  // Daily planner at 08:00 ET.
   const rule = new schedule.RecurrenceRule();
   rule.hour = 8;
   rule.minute = 0;
@@ -103,8 +99,23 @@ function main() {
   schedule.scheduleJob(rule, plan);
   log.info('Daily planner armed for 08:00 America/New_York.');
 
-  // Plan immediately so the bot reacts on the day it is launched.
-  plan();
+  // Intraday kill-switch monitor: every 10 min during the session (ET).
+  if (risk.isEnabled()) {
+    const mon = new schedule.RecurrenceRule();
+    mon.dayOfWeek = [1, 2, 3, 4, 5];
+    mon.hour = [9, 10, 11, 12, 13, 14, 15];
+    mon.minute = [0, 10, 20, 30, 40, 50];
+    mon.tz = TIMEZONE;
+    schedule.scheduleJob(mon, safe(() => risk.checkDailyLoss(), 'risk-monitor'));
+    log.info(`Kill switch ARMED: max daily loss ${(risk.MAX_DAILY_LOSS_PCT * 100).toFixed(2)}%.`);
+  } else {
+    log.info('Kill switch disabled (set MAX_DAILY_LOSS_PCT in .env to enable).');
+  }
+
+  // Plan immediately on launch.
+  await plan();
+
+  await notify('🤖 Trading bot started.');
 
   const shutdown = (sig) => {
     log.info(`Received ${sig}. Shutting down...`);
